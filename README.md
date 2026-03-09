@@ -13,6 +13,7 @@ Firmware custom pour figer le MCS (0, 1, 2, 3).
 Le firmware stock ignore les demandes de rate du driver `ath9k_htc`. Ce fork permet de figer le MCS à la compilation.
 
 ```bash
+sudo apt install build-essential cmake git m4 texinfo wget
 git clone https://github.com/alixpat/open-ath9k-htc-firmware.git
 cd open-ath9k-htc-firmware
 

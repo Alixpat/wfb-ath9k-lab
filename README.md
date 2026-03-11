@@ -13,7 +13,6 @@ Firmware custom pour figer le MCS (0, 1, 2, 3).
 Le firmware stock ignore les demandes de rate du driver `ath9k_htc`. Ce fork permet de figer le MCS à la compilation.
 
 ```bash
-sudo apt install build-essential cmake git m4 texinfo wget
 git clone https://github.com/alixpat/open-ath9k-htc-firmware.git
 cd open-ath9k-htc-firmware
 
@@ -74,11 +73,28 @@ echo "deb [signed-by=/usr/share/keyrings/wfb-ng.gpg] https://apt.wfb-ng.org/ boo
 # Ubuntu 24.04 (noble supporté nativement)
 # echo "deb [signed-by=/usr/share/keyrings/wfb-ng.gpg] https://apt.wfb-ng.org/ noble release-25.01" \
 #   | sudo tee /etc/apt/sources.list.d/wfb-ng.list
-sudo apt update && sudo apt install -y wfb-ng
 
-# Clés (une seule fois, copier gs.key sur le RX, drone.key sur le TX)
-sudo wfb_keygen
+sudo apt update && sudo apt install -y wfb-ng
 ```
+
+### Clés de chiffrement
+
+wfb-ng chiffre le lien radio. Il faut générer une paire de clés et les distribuer :
+
+```bash
+# Générer les clés (sur une des deux machines)
+sudo wfb_keygen
+
+# Les clés sont créées dans /etc/
+# /etc/gs.key    → à copier sur la machine RX (ground station)
+# /etc/drone.key → à copier sur la machine TX (drone/émetteur)
+
+# Copier la clé vers l'autre machine (exemple)
+scp /etc/drone.key user@machine-tx:/tmp/
+ssh user@machine-tx "sudo cp /tmp/drone.key /etc/drone.key && sudo chmod 600 /etc/drone.key"
+```
+
+Chaque machine n'a besoin que de sa propre clé : `gs.key` sur le RX, `drone.key` sur le TX.
 
 ## Configuration
 
@@ -104,12 +120,45 @@ Le nom de l'interface est visible avec `iw dev`.
 
 ### /etc/wifibroadcast.cfg
 
-Même fichier sur les deux machines :
+Ce fichier n'existe pas par défaut, il faut le créer. Il surcharge la configuration par défaut de wfb-ng (`/usr/lib/python3/dist-packages/wfb_ng/conf/master.cfg`).
 
-```ini
+**Machine TX (drone/émetteur)** :
+
+```bash
+sudo tee /etc/wifibroadcast.cfg << 'EOF'
 [common]
 wifi_channel = 11
+
+[drone_tunnel]
+fec_k = 1
+fec_n = 4
+EOF
 ```
+
+**Machine RX (ground station)** :
+
+```bash
+sudo tee /etc/wifibroadcast.cfg << 'EOF'
+[common]
+wifi_channel = 11
+
+[gs_tunnel]
+fec_k = 1
+fec_n = 4
+EOF
+```
+
+### Optimisation FEC pour la portée
+
+Le FEC (Forward Error Correction) ajoute de la redondance aux paquets radio. Plus le ratio `fec_n / fec_k` est élevé, plus le lien tolère de pertes, au prix du débit utile.
+
+| fec_k | fec_n | Perte tolérée | Débit utile (MCS 0) | Usage |
+|-------|-------|---------------|---------------------|-------|
+| 1     | 2     | 50%           | ~3 Mbit/s           | Défaut tunnel |
+| 1     | 4     | 75%           | ~1.5 Mbit/s         | Portée élevée |
+| 1     | 6     | 83%           | ~1 Mbit/s           | Portée maximale |
+
+Pour du tunnel IP (SSH, ping), `fec_k=1 fec_n=4` est un bon point de départ. Monter à `fec_n=6` si les pertes sont trop élevées en limite de portée.
 
 ### Démarrer
 

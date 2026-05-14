@@ -1,0 +1,25 @@
+# Clés libsodium wfb-ng — NE JAMAIS COMMITER
+# Quiconque les obtient peut décrypter le lien radio
+*.key
+
+# Firmwares binaires (recompilables via open-ath9k-htc-firmware)
+*.fw
+*.fw.mcs*
+*.fw.zst
+
+# Logs et captures
+*.log
+*.pcap
+*.pcapng
+
+# Notes de travail privées
+results/private/
+.notes/
+TODO.local.md
+
+# Éditeurs / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

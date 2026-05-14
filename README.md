@@ -8,6 +8,27 @@ Firmware custom pour figer le MCS (0, 1, 2, 3).
 - 2x dongles USB AR9271 (Alpha AWUS036NHA + générique AliExpress)
 - Debian 12/13 ou Ubuntu 24.04+ (x86_64)
 
+## Convention de notation
+
+Dans tout ce document, `<WIFI_IFACE>` désigne le nom de l'interface wifi du dongle AR9271. Récupère-le **avant** de commencer, sur chaque machine :
+
+```bash
+iw dev
+# Exemple : Interface wlx00c0cab4fb55
+```
+
+Le format `wlxXXXXXXXXXXXX` (12 hex après `wlx`) est dérivé de l'adresse MAC du dongle. Substitue `<WIFI_IFACE>` par ta valeur dans toutes les commandes ci-dessous.
+
+## Reproduire l'environnement de manip
+
+Les sections ci-dessous référencent plusieurs dépôts externes (firmware AR9271 patché, source amont wfb-ng, driver RTL8812AU). Pour les cloner d'un coup au même endroit que ce repo :
+
+```bash
+./setup.sh
+```
+
+Le script est idempotent : il vérifie chaque dépôt avant de cloner et n'écrase rien.
+
 ## Firmware custom (MCS fixe)
 
 Le firmware stock ignore les demandes de rate du driver `ath9k_htc`. Ce fork permet de figer le MCS à la compilation.
@@ -105,7 +126,7 @@ NetworkManager va tenter de gérer l'interface AR9271. Il faut l'exclure (rempla
 ```bash
 # /etc/NetworkManager/conf.d/wfb.conf
 [keyfile]
-unmanaged-devices=interface-name:wlx00c0cab4fb55  # adapter à votre interface
+unmanaged-devices=interface-name:<WIFI_IFACE>
 ```
 
 Puis `sudo systemctl restart NetworkManager`.
@@ -113,10 +134,8 @@ Puis `sudo systemctl restart NetworkManager`.
 ### /etc/default/wifibroadcast
 
 ```
-WFB_NICS="wlx00c0cab4fb55"  # adapter à votre interface
+WFB_NICS="<WIFI_IFACE>"
 ```
-
-Le nom de l'interface est visible avec `iw dev`.
 
 ### /etc/wifibroadcast.cfg
 
@@ -218,6 +237,63 @@ ping -c 100 10.5.0.2
 4. Noter le RSSI, la latence moyenne et le taux de perte
 5. Recommencer avec un autre MCS
 
+Les mesures sont à consigner dans `results/` (voir `results/README.md` pour le format).
+
+## Dépannage
+
+### Le dongle n'apparaît pas
+
+```bash
+lsusb | grep -i atheros          # USB ID 0cf3:9271 attendu
+iw dev                           # liste les interfaces wifi
+dmesg | grep -i ath9k_htc        # erreurs de chargement firmware/driver
+```
+
+Si `dmesg` montre `firmware loading failed`, vérifier que `/lib/firmware/ath9k_htc/htc_9271-1.4.0.fw` existe et n'est pas corrompu (`file` doit retourner `data`, pas `ASCII text`).
+
+### Le firmware custom ne se charge pas
+
+Symptôme : `dmesg` montre l'ancien firmware ou un mismatch de version.
+
+- **Debian** : le driver lit `.fw` non compressé. Vérifier l'extension et le SHA du fichier installé.
+- **Ubuntu 24.04+** : le driver lit `.fw.zst` en priorité. Si tu poses un `.fw` à côté, **il faut supprimer le `.fw.zst`** sinon il reprend le firmware stock.
+
+```bash
+sudo ls -l /lib/firmware/ath9k_htc/htc_9271-1.4.0.fw*
+sudo modprobe -r ath9k_htc && sudo modprobe ath9k_htc
+dmesg | tail -20
+```
+
+### NetworkManager reprend l'interface après reboot
+
+La conf `unmanaged-devices` doit être dans `/etc/NetworkManager/conf.d/` (pas dans `NetworkManager.conf` directement) et NM doit être redémarré.
+
+```bash
+sudo cat /etc/NetworkManager/conf.d/wfb.conf
+sudo nmcli device status              # <WIFI_IFACE> doit afficher "unmanaged"
+sudo systemctl restart NetworkManager
+```
+
+### `wfb-cli` reste à 0 paquet RX
+
+Dans l'ordre, vérifier :
+
+1. **Service côté émetteur lancé** : `sudo systemctl status wifibroadcast@drone` côté TX.
+2. **Même canal des deux côtés** : `wifi_channel` dans `/etc/wifibroadcast.cfg` doit matcher (et le canal doit être autorisé par le `wifi_region` du driver).
+3. **Même `link_domain`** : sinon les paquets sont rejetés par hashage MAC.
+4. **Clés cohérentes** : `drone.key` (TX) et `gs.key` (RX) doivent être issus du même `wfb_keygen`. Si tu as régénéré d'un côté, regénère partout.
+5. **Carte en mode monitor** : `iw dev <WIFI_IFACE> info` doit indiquer `type monitor`. Sinon, le service wfb-ng n'a pas pris la main (NetworkManager ou autre).
+
+### Ping `10.5.0.2` timeout mais `wfb-cli` montre des paquets
+
+L'interface tunnel n'est pas montée ou non routée d'un côté :
+
+```bash
+ip link show wfb-tun          # doit être UP
+ip addr show wfb-tun          # doit avoir 10.5.0.X/24
+sudo journalctl -xu wifibroadcast@gs | grep -i tunnel
+```
+
 ## Licence
 
-MIT
+MIT — voir `LICENSE`.

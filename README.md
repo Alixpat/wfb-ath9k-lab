@@ -8,6 +8,43 @@ Firmware custom pour figer le MCS (0, 1, 2, 3).
 - 2x dongles USB AR9271 (Alpha AWUS036NHA + générique AliExpress)
 - Debian 12/13 ou Ubuntu 24.04+ (x86_64)
 
+## Caractérisation des dongles
+
+Le firmware AR9271 est commun mais la **calibration EEPROM** diffère d'un dongle à l'autre. Elle plafonne notamment la puissance d'émission, **indépendamment de la régulation système**. La regdom positionnée par `wifi_region` dans `/etc/wifibroadcast.cfg` peut être ignorée par le driver si l'EEPROM impose sa propre regdom.
+
+### Inspection
+
+Après branchement, sur chaque machine :
+
+```bash
+# Trouver le phy associé au dongle
+iw dev
+# → "Interface <WIFI_IFACE>" sous "phy#N"
+
+# Inspecter ses capabilités
+sudo iw phy phy<N> info | grep -E "MHz \[|country"
+```
+
+À lire dans la sortie :
+- `country XX:` la regdom appliquée à ce phy (peut différer du `iw reg get` global)
+- `* 2XXX.0 MHz [c] (Y.Y dBm)` la limite EIRP par canal (où `c` est le numéro de canal)
+- `(disabled)` les canaux interdits
+
+### Résultats observés
+
+| Dongle | USB ID | Regdom phy | EIRP max mesuré | Canaux disabled | Notes |
+|---|---|---|---|---|---|
+| AR9271 générique AliExpress (MAC `24:ec:99:ca:c1:ef`) | `0cf3:9271` | US: DFS-FCC | **20.0 dBm** uniforme canaux 1-11 | 12, 13, 14 | `wifi_region = 'BO'` dans cfg **ignoré** — le driver garde sa regdom EEPROM. `wifi_txpower = 3000` (30 dBm) → `iw set txpower fixed 3000` retourne `EINVAL`, `wfb-server` crashe au boot. |
+| Alpha AWUS036NHA | `0cf3:9271` | _à mesurer_ | _à mesurer_ | _à mesurer_ | _à compléter au premier branchement_ |
+
+### Conséquence pour le link budget
+
+Sur le dongle générique caractérisé ci-dessus, **la puissance d'émission est verrouillée à 20 dBm** par la calibration EEPROM, quel que soit `wifi_txpower` dans la config. Les leviers réels deviennent :
+
+1. **Bande étroite 5/10 MHz** (voir section dédiée) : +3 à +6 dB sans toucher au TX.
+2. **Antennes directives** : +10 à +20 dB selon le gain, c'est le multiplicateur dominant.
+3. Reflashage EEPROM : déconseillé (risque de brick, légalité douteuse).
+
 ## Convention de notation
 
 Dans tout ce document, `<WIFI_IFACE>` désigne le nom de l'interface wifi du dongle AR9271. Récupère-le **avant** de commencer, sur chaque machine :
@@ -286,7 +323,7 @@ Le firmware AR9271 custom (MCS figé) doit rester en place. Il agit sur l'index 
 ### Caveats à valider avant de croire les chiffres
 
 1. **Firmware custom à 5/10 MHz** : alixpat/open-ath9k-htc-firmware a été testé à HT20. Vérifier qu'aucun chemin codé en dur ne casse le mode étroit. Test rapide : flasher MCS0, configurer `bandwidth = 10`, lancer `wfb-cli` et observer que des paquets passent.
-2. **Régulatoire** : les canaux 5/10 MHz hors standard 802.11. `wifi_region = 'BO'` lève les blocages CRDA mais ne te dispense pas du droit local. Test sur banc fermé d'abord.
+2. **Régulatoire** : les canaux 5/10 MHz hors standard 802.11. `wifi_region = 'BO'` est censé lever les blocages CRDA, mais **peut être ignoré** par certains dongles dont l'EEPROM impose sa propre regdom (voir « Caractérisation des dongles »). Vérifier avec `sudo iw phy phyX info | grep country` après démarrage du service. Test sur banc fermé d'abord.
 3. **Drift de l'oscillateur** : le TCXO de l'AR9271 (~±20 ppm) reste OK à 5 MHz mais marge plus serrée. À surveiller en dérive thermique (dongle au soleil).
 4. **Numérotation canal** : les channels entiers (1, 6, 11…) sont définis pour HT20. À 5/10 MHz, spécifier en MHz directement (`wifi_channel = 2412`). master.cfg confirme que c'est supporté.
 5. **`iw` doit accepter la commande** : vérifier `iw list | grep -A20 "Supported channel width"` et `iw dev <WIFI_IFACE> set freq 2412 10MHz` doit retourner 0.

@@ -3,6 +3,16 @@
 Banc d'essai wfb-ng avec deux dongles Atheros AR9271 (2.4 GHz, HT20).  
 Firmware custom pour figer le MCS (0, 1, 2, 3).
 
+## Structure du dépôt
+
+| Chemin     | Rôle                                                                 |
+|------------|----------------------------------------------------------------------|
+| `README.md`| Procédure de bout en bout (ce fichier).                              |
+| `setup.sh` | Clonage idempotent des dépôts liés (firmware, wfb-ng, driver).       |
+| `docs/`    | Documentation détaillée des modifications (patch driver, etc.).      |
+| `patches/` | Patches kernel/firmware appliquables avec `patch -p1`.               |
+| `results/` | Mesures terrain par session (template dans `results/README.md`).     |
+
 ## Matériel
 
 - 2x dongles USB AR9271 (Alpha AWUS036NHA + générique AliExpress)
@@ -10,7 +20,7 @@ Firmware custom pour figer le MCS (0, 1, 2, 3).
 
 ## Caractérisation des dongles
 
-Le firmware AR9271 est commun mais la **calibration EEPROM** diffère d'un dongle à l'autre. Elle plafonne notamment la puissance d'émission, **indépendamment de la régulation système**. La regdom positionnée par `wifi_region` dans `/etc/wifibroadcast.cfg` peut être ignorée par le driver si l'EEPROM impose sa propre regdom.
+Le firmware AR9271 est commun mais l'EEPROM diffère d'un dongle à l'autre. Elle contient (entre autres) un **regdomain code** (`0x8348` = US sur l'Alfa testée, `0x0` = « suit le default driver » sur le clone AliExpress, qui mappe `US` sur kernel actuel). Ce regdomain est **posé en custom-reg** par le driver `ath` sur le wiphy au probe, ce qui force cfg80211 à appliquer **l'intersection EEPROM-regdom ∩ regdom-globale** sur les channel limits. Conséquences observées sans patch (regdom EEPROM US, global FR via Country IE) : canaux 12-13 disabled, puissance plafonnée à `min(FR=20, US=30) = 20 dBm`. Le `wifi_region` de `/etc/wifibroadcast.cfg` ne peut pas contourner ça côté driver — voir « Patcher le driver `ath` » plus bas.
 
 ### Inspection
 
@@ -43,21 +53,39 @@ echo "RC=$?"
 
 | Dongle | USB ID | Regdom phy | EIRP max | Canaux disabled | 5/10 MHz | Notes |
 |---|---|---|---|---|---|---|
-| AR9271 générique AliExpress (MAC `24:ec:99:ca:c1:ef`) | `0cf3:9271` | US: DFS-FCC | **20.0 dBm** sur canaux 1-11 | 12, 13, 14 | **non** | `wifi_region = 'BO'` ignoré (EEPROM gagne). `wifi_txpower = 3000` → `EINVAL`, crash. `bandwidth = 10` → `kernel reports: 5/10 MHz not supported` (RC -22), crash `wfb-server`. |
-| Alpha AWUS036NHA | `0cf3:9271` | _à mesurer_ | _à mesurer_ | _à mesurer_ | _à mesurer_ | _à compléter au premier branchement_ |
+| AR9271 générique AliExpress (MAC `24:ec:99:ca:c1:ef`) | `0cf3:9271` | EEPROM `0x0` → US: DFS-FCC | **20.0 dBm** canaux 1-11 (intersection driver-ath ∩ global FR) | 12, 13, 14 (avant patch) | **non** | `wifi_region = 'BO'` dans wfb-ng n'a aucun effet sur cette intersection. `bandwidth = 10` → `5/10 MHz not supported` (RC -22). **Avec patch `ath` + regdom global `GY` : 1-13 enabled @ 30 dBm côté regdom** (cap hardware reste à mesurer). |
+| Alpha AWUS036NHA (MAC `00:c0:ca:b4:fb:55`) | `0cf3:9271` | EEPROM `0x8348` → US: DFS-FCC | _à mesurer_ | _à mesurer_ | _à mesurer_ | EEPROM US gravée (vs default driver pour le clone). Channel limits effectifs identiques au clone avant patch, par même mécanisme d'intersection. |
 
 ### Conséquence pour le link budget
 
-Sur le dongle générique caractérisé ci-dessus :
-- **TX verrouillé à 20 dBm** par calibration EEPROM (quel que soit `wifi_txpower`).
-- **Bande étroite 5/10 MHz inaccessible** (rejet driver/kernel).
+Sur le dongle générique caractérisé ci-dessus, **avant** patch driver :
+- **TX plafonné à 20 dBm** par l'intersection custom-reg-driver-`ath` (US, 30 dBm) ∩ regdom global (FR, 20 dBm) — pas l'EEPROM directement.
+- **Bande étroite 5/10 MHz inaccessible** (`5/10 MHz not supported` retourné par le driver — capability non exposée par le couple driver+firmware+phy pour cette carte).
 
-Donc deux leviers théoriques sur trois sont éliminés. Les options qui restent :
+**Avec patch `ath`** (voir section dédiée) + regdom global permissif (`GY`, 30 dBm canaux 1-13) :
+- Plafond regdom remonté à 30 dBm canaux 1-13. Le hardware AR9271 reste l'autre plafond (typiquement ~20-23 dBm en pratique, à mesurer).
+- Bande étroite 5/10 MHz **reste indisponible** — le patch agit sur la regdom, pas sur les capabilities chandef.
+
+Les options qui restent :
 
 1. **Antennes directives** : +10 à +20 dB selon le gain, c'est le multiplicateur dominant. Seul levier réel sur cette plateforme.
 2. **FEC plus généreux** : compromis débit/robustesse, pas de gain de portée mais de fiabilité en limite.
 3. Tester un autre dongle (l'Alpha peut avoir des capabilities différentes — à mesurer).
 4. Reflashage EEPROM : déconseillé (risque de brick, légalité douteuse).
+5. **Patcher le driver `ath` pour débloquer canaux 12-13 et +puissance** — voir ci-dessous.
+
+## Patcher le driver `ath` (canaux 12-13 et plus de puissance)
+
+Le verrou n'est en réalité **pas la calibration EEPROM** : c'est le driver `ath` qui pose la regdom EEPROM (`US` pour les deux dongles AR9271 du lab) comme **custom-reg** sur le wiphy, ce qui force cfg80211 à appliquer en permanence une intersection (EEPROM ∩ regdom globale) sur les channel limits. Résultat : canaux 12-13 disabled (US s'arrête à 2472 MHz) et puissance plafonnée à la plus restrictive des deux.
+
+Le patch `patches/0001-ath-no-custom-regd.patch` retire ce mécanisme dans `ath_regd_init_wiphy()`. La phy hérite alors directement de la regdom globale cfg80211 :
+
+- Avec global `GY` (Guyana) : canaux **1-13 enabled à 30 dBm** (regdb `2402-2482 @ 30 dBm`, pas de DFS).
+- Toujours plafonné par la radio hardware en pratique (~20-23 dBm sur AR9271).
+
+Procédure complète (build, install, regdom global, vérif, troubleshoot) : voir [`docs/patch-ath-regd.md`](docs/patch-ath-regd.md).
+
+**Avertissement** : retirer ce verrou rend la carte capable d'émettre hors-bande EU (canaux 12-13) et au-dessus du plafond local (30 dBm vs FR 20 dBm). Banc d'essai isolé uniquement.
 
 ## Convention de notation
 
@@ -337,7 +365,7 @@ Le firmware AR9271 custom (MCS figé) doit rester en place. Il agit sur l'index 
 ### Caveats à valider avant de croire les chiffres
 
 1. **Support driver/phy** (bloquant constaté sur AR9271 AliExpress) : `cfg80211` valide chaque chandef via les capabilities exposées par le phy. Tester avant tout autre chose avec `sudo iw dev <WIFI_IFACE> set channel 11 10MHz` (service wfb-ng arrêté, interface up en monitor). RC≠0 ou message `5/10 MHz not supported` → ce dongle est éliminé pour la bande étroite, pas la peine d'aller plus loin. Le firmware MCS0 patché par alixpat/open-ath9k-htc-firmware n'a pas vocation à ajouter ce support — si le mainline ne l'expose pas pour ton hardware, c'est mort.
-2. **Régulatoire** : les canaux 5/10 MHz hors standard 802.11. `wifi_region = 'BO'` est censé lever les blocages CRDA, mais **peut être ignoré** par certains dongles dont l'EEPROM impose sa propre regdom (voir « Caractérisation des dongles »). Vérifier avec `sudo iw phy phyX info | grep country` après démarrage du service. Test sur banc fermé d'abord.
+2. **Régulatoire** : les canaux 5/10 MHz hors standard 802.11. `wifi_region` dans `wfb-ng` ne touche **pas** le custom-reg posé par le driver `ath` — pour passer outre l'intersection EEPROM ∩ global, c'est le patch driver qui agit (voir « Patcher le driver `ath` »). Vérifier l'état effectif après démarrage avec `sudo iw phy phyN info | grep -E 'country|24[67]'`. Test sur banc fermé d'abord.
 3. **Drift de l'oscillateur** : le TCXO de l'AR9271 (~±20 ppm) reste OK à 5 MHz mais marge plus serrée. À surveiller en dérive thermique (dongle au soleil).
 4. **Numérotation canal** : les channels entiers (1, 6, 11…) sont définis pour HT20. À 5/10 MHz, spécifier en MHz directement (`wifi_channel = 2412`). master.cfg confirme que c'est supporté.
 5. **`iw` doit accepter la commande** : vérifier `iw list | grep -A20 "Supported channel width"` et `iw dev <WIFI_IFACE> set freq 2412 10MHz` doit retourner 0.

@@ -239,6 +239,80 @@ ping -c 100 10.5.0.2
 
 Les mesures sont à consigner dans `results/` (voir `results/README.md` pour le format).
 
+## Bande étroite (5/10 MHz) — pousser le link budget
+
+> **⚠️ Section non validée expérimentalement.** Les chiffres ci-dessous sont théoriques. À confirmer / corriger après les premiers tests terrain. Tableau de résultats vierge en fin de section.
+
+L'AR9271 + `ath9k_htc` mainline supportent nativement les bandes 5 MHz et 10 MHz, en plus du 20 MHz par défaut. wfb-ng les expose explicitement via `bandwidth = 5` ou `10` dans `/etc/wifibroadcast.cfg`. Côté RTL8812AU/EU, ces modes sont **inaccessibles** (verrou silicium/firmware). C'est donc un avantage spécifique au lab AR9271.
+
+### Principe
+
+Le bruit thermique d'un récepteur est proportionnel à la largeur de bande : `N = kTB`. Diviser B par 2 abaisse le noise floor de 3 dB, donc améliore la sensibilité d'autant à modulation égale. En espace libre (atténuation en 1/r²), **+6 dB ≈ doublement de la portée utile**.
+
+### Gain théorique (à vérifier)
+
+À MCS0 fixé (BPSK 1/2, le mode le plus sensible) :
+
+| Bandwidth | Noise floor théo. | Sensibilité MCS0 théo. | Gain vs 20 MHz | Débit utile théo. |
+|-----------|-------------------|------------------------|----------------|-------------------|
+| 20 MHz    | -101 dBm          | ~-82 dBm               | référence      | 6.5 Mbit/s        |
+| 10 MHz    | -104 dBm          | ~-85 dBm               | **+3 dB**      | 3.25 Mbit/s       |
+| 5 MHz     | -107 dBm          | ~-88 dBm               | **+6 dB**      | 1.6 Mbit/s        |
+
+Le débit utile reste largement suffisant pour du tunnel IP, télémétrie mavlink et même H.265 à très bas bitrate.
+
+### Configuration
+
+Côté TX et RX, `/etc/wifibroadcast.cfg` :
+
+```ini
+[common]
+wifi_channel = 2412     # spécifier en MHz, pas en numéro de canal
+wifi_region  = 'BO'     # région permissive (régulatoire — à tes risques)
+
+[base]
+bandwidth = 5           # ou 10 — commencer par 10, descendre à 5 si stable
+mcs_index = 0
+ldpc      = 1           # vérifier que l'AR9271 l'accepte à 5/10 MHz
+stbc      = 1
+
+[radio_base]
+fec_k = 1
+fec_n = 8               # FEC très généreux : 87% pertes tolérées, ~200 kbit/s utile en 5 MHz
+```
+
+Le firmware AR9271 custom (MCS figé) doit rester en place. Il agit sur l'index MCS, pas sur la largeur de bande — donc en principe compatible avec 5/10 MHz, **à confirmer**.
+
+### Caveats à valider avant de croire les chiffres
+
+1. **Firmware custom à 5/10 MHz** : alixpat/open-ath9k-htc-firmware a été testé à HT20. Vérifier qu'aucun chemin codé en dur ne casse le mode étroit. Test rapide : flasher MCS0, configurer `bandwidth = 10`, lancer `wfb-cli` et observer que des paquets passent.
+2. **Régulatoire** : les canaux 5/10 MHz hors standard 802.11. `wifi_region = 'BO'` lève les blocages CRDA mais ne te dispense pas du droit local. Test sur banc fermé d'abord.
+3. **Drift de l'oscillateur** : le TCXO de l'AR9271 (~±20 ppm) reste OK à 5 MHz mais marge plus serrée. À surveiller en dérive thermique (dongle au soleil).
+4. **Numérotation canal** : les channels entiers (1, 6, 11…) sont définis pour HT20. À 5/10 MHz, spécifier en MHz directement (`wifi_channel = 2412`). master.cfg confirme que c'est supporté.
+5. **`iw` doit accepter la commande** : vérifier `iw list | grep -A20 "Supported channel width"` et `iw dev <WIFI_IFACE> set freq 2412 10MHz` doit retourner 0.
+
+### Protocole de test
+
+1. Sur banc fermé (atténuateur ou faraday), avec MCS0 firmware déjà flashé :
+   - Test A : `bandwidth = 20` (référence)
+   - Test B : `bandwidth = 10`
+   - Test C : `bandwidth = 5`
+2. À chaque palier, sur 5 minutes :
+   - Démarrer `wifibroadcast@gs` / `@drone`, attendre la session
+   - Lancer `ping -c 600 -i 0.5 10.5.0.2` (5 min de ping)
+   - Capturer le RSSI moyen via `wfb-cli gs`
+   - Capturer le débit utile effectif via `iperf3` (en parallèle, sur le tunnel)
+3. Comparer : le gain de RSSI à perte égale doit suivre la table ci-dessus (±1 dB pour bruit de mesure).
+4. Si A→B confirme ~+3 dB et B→C confirme ~+6 dB cumulé, descendre en extérieur avec antenne directive pour mesurer le gain en portée réel.
+
+### Résultats (à remplir)
+
+| Date | Bandwidth | MCS | FEC | RSSI moyen | Perte | Débit utile mesuré | Notes |
+|------|-----------|-----|-----|------------|-------|--------------------|-------|
+| _vide_ | | | | | | | |
+
+Une fois ces lignes complétées, mettre à jour la table « gain théorique » avec les valeurs mesurées (et marquer celles qui restent théoriques).
+
 ## Dépannage
 
 ### Le dongle n'apparaît pas

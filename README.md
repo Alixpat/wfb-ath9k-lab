@@ -23,27 +23,41 @@ iw dev
 
 # Inspecter ses capabilités
 sudo iw phy phy<N> info | grep -E "MHz \[|country"
+
+# Tester le support des modes bande étroite (service wfb-ng arrêté + interface up en monitor)
+sudo systemctl stop wifibroadcast@gs 2>/dev/null
+sudo ip link set <WIFI_IFACE> up
+sudo iw dev <WIFI_IFACE> set channel 11 10MHz
+echo "RC=$?"   # 0 = supporté, non-zéro = refusé
+sudo iw dev <WIFI_IFACE> set channel 11 5MHz
+echo "RC=$?"
 ```
 
 À lire dans la sortie :
 - `country XX:` la regdom appliquée à ce phy (peut différer du `iw reg get` global)
 - `* 2XXX.0 MHz [c] (Y.Y dBm)` la limite EIRP par canal (où `c` est le numéro de canal)
 - `(disabled)` les canaux interdits
+- Pour le support 5/10 MHz : RC=0 du `iw set channel ... NMHz` veut dire OK. Sinon `dmesg` ou le journal de wfb-server contient `kernel reports: 5/10 MHz not supported`.
 
 ### Résultats observés
 
-| Dongle | USB ID | Regdom phy | EIRP max mesuré | Canaux disabled | Notes |
-|---|---|---|---|---|---|
-| AR9271 générique AliExpress (MAC `24:ec:99:ca:c1:ef`) | `0cf3:9271` | US: DFS-FCC | **20.0 dBm** uniforme canaux 1-11 | 12, 13, 14 | `wifi_region = 'BO'` dans cfg **ignoré** — le driver garde sa regdom EEPROM. `wifi_txpower = 3000` (30 dBm) → `iw set txpower fixed 3000` retourne `EINVAL`, `wfb-server` crashe au boot. |
-| Alpha AWUS036NHA | `0cf3:9271` | _à mesurer_ | _à mesurer_ | _à mesurer_ | _à compléter au premier branchement_ |
+| Dongle | USB ID | Regdom phy | EIRP max | Canaux disabled | 5/10 MHz | Notes |
+|---|---|---|---|---|---|---|
+| AR9271 générique AliExpress (MAC `24:ec:99:ca:c1:ef`) | `0cf3:9271` | US: DFS-FCC | **20.0 dBm** sur canaux 1-11 | 12, 13, 14 | **non** | `wifi_region = 'BO'` ignoré (EEPROM gagne). `wifi_txpower = 3000` → `EINVAL`, crash. `bandwidth = 10` → `kernel reports: 5/10 MHz not supported` (RC -22), crash `wfb-server`. |
+| Alpha AWUS036NHA | `0cf3:9271` | _à mesurer_ | _à mesurer_ | _à mesurer_ | _à mesurer_ | _à compléter au premier branchement_ |
 
 ### Conséquence pour le link budget
 
-Sur le dongle générique caractérisé ci-dessus, **la puissance d'émission est verrouillée à 20 dBm** par la calibration EEPROM, quel que soit `wifi_txpower` dans la config. Les leviers réels deviennent :
+Sur le dongle générique caractérisé ci-dessus :
+- **TX verrouillé à 20 dBm** par calibration EEPROM (quel que soit `wifi_txpower`).
+- **Bande étroite 5/10 MHz inaccessible** (rejet driver/kernel).
 
-1. **Bande étroite 5/10 MHz** (voir section dédiée) : +3 à +6 dB sans toucher au TX.
-2. **Antennes directives** : +10 à +20 dB selon le gain, c'est le multiplicateur dominant.
-3. Reflashage EEPROM : déconseillé (risque de brick, légalité douteuse).
+Donc deux leviers théoriques sur trois sont éliminés. Les options qui restent :
+
+1. **Antennes directives** : +10 à +20 dB selon le gain, c'est le multiplicateur dominant. Seul levier réel sur cette plateforme.
+2. **FEC plus généreux** : compromis débit/robustesse, pas de gain de portée mais de fiabilité en limite.
+3. Tester un autre dongle (l'Alpha peut avoir des capabilities différentes — à mesurer).
+4. Reflashage EEPROM : déconseillé (risque de brick, légalité douteuse).
 
 ## Convention de notation
 
@@ -278,9 +292,9 @@ Les mesures sont à consigner dans `results/` (voir `results/README.md` pour le 
 
 ## Bande étroite (5/10 MHz) — pousser le link budget
 
-> **⚠️ Section non validée expérimentalement.** Les chiffres ci-dessous sont théoriques. À confirmer / corriger après les premiers tests terrain. Tableau de résultats vierge en fin de section.
+> **⚠️ À ce jour, indisponible sur notre dongle AR9271 AliExpress.** Test réalisé le 2026-05-14 : le kernel renvoie `5/10 MHz not supported` (RC -22) à `iw dev <WIFI_IFACE> set channel 11 10MHz`, et `wfb-server` crashe au démarrage. La section reste documentée pour rester applicable au cas où un autre dongle AR9271 (ou un AR9380 PCIe) expose les bonnes capabilities ; **vérifier le support driver/phy avant de croire aux gains ci-dessous**. Voir « Caractérisation des dongles » pour la procédure de test.
 
-L'AR9271 + `ath9k_htc` mainline supportent nativement les bandes 5 MHz et 10 MHz, en plus du 20 MHz par défaut. wfb-ng les expose explicitement via `bandwidth = 5` ou `10` dans `/etc/wifibroadcast.cfg`. Côté RTL8812AU/EU, ces modes sont **inaccessibles** (verrou silicium/firmware). C'est donc un avantage spécifique au lab AR9271.
+En théorie, l'AR9271 + `ath9k_htc` mainline supportent les bandes 5 MHz et 10 MHz, et wfb-ng les expose via `bandwidth = 5` ou `10`. En pratique, le support dépend des capabilities exposées par le phy (cfg80211 valide via `cfg80211_chandef_create`), qui dépendent du couple driver + firmware + EEPROM. Côté RTL8812AU/EU, ces modes sont de toute façon **inaccessibles** (verrou silicium/firmware).
 
 ### Principe
 
@@ -322,7 +336,7 @@ Le firmware AR9271 custom (MCS figé) doit rester en place. Il agit sur l'index 
 
 ### Caveats à valider avant de croire les chiffres
 
-1. **Firmware custom à 5/10 MHz** : alixpat/open-ath9k-htc-firmware a été testé à HT20. Vérifier qu'aucun chemin codé en dur ne casse le mode étroit. Test rapide : flasher MCS0, configurer `bandwidth = 10`, lancer `wfb-cli` et observer que des paquets passent.
+1. **Support driver/phy** (bloquant constaté sur AR9271 AliExpress) : `cfg80211` valide chaque chandef via les capabilities exposées par le phy. Tester avant tout autre chose avec `sudo iw dev <WIFI_IFACE> set channel 11 10MHz` (service wfb-ng arrêté, interface up en monitor). RC≠0 ou message `5/10 MHz not supported` → ce dongle est éliminé pour la bande étroite, pas la peine d'aller plus loin. Le firmware MCS0 patché par alixpat/open-ath9k-htc-firmware n'a pas vocation à ajouter ce support — si le mainline ne l'expose pas pour ton hardware, c'est mort.
 2. **Régulatoire** : les canaux 5/10 MHz hors standard 802.11. `wifi_region = 'BO'` est censé lever les blocages CRDA, mais **peut être ignoré** par certains dongles dont l'EEPROM impose sa propre regdom (voir « Caractérisation des dongles »). Vérifier avec `sudo iw phy phyX info | grep country` après démarrage du service. Test sur banc fermé d'abord.
 3. **Drift de l'oscillateur** : le TCXO de l'AR9271 (~±20 ppm) reste OK à 5 MHz mais marge plus serrée. À surveiller en dérive thermique (dongle au soleil).
 4. **Numérotation canal** : les channels entiers (1, 6, 11…) sont définis pour HT20. À 5/10 MHz, spécifier en MHz directement (`wifi_channel = 2412`). master.cfg confirme que c'est supporté.
